@@ -4,7 +4,9 @@ A powershell cmdlet to parse the content and calculate the checksum of internal 
 
 ## Usage
 
+```
 ReadPsv.PS1 -romFile [Path to psv file] [-Extract] [-Details] [-Headered]
+```
 
 - Extract: Will extract the internal files to the current working directory. This might take anyware around 1.5GB to 3.7GB of space and the files are encrypted.
 - Details: Print some debug messages, mainly for development purposes.
