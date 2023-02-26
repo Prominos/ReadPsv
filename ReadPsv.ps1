@@ -4,7 +4,8 @@
     [switch]$Extract = $False,
     [Parameter(HelpMessage="Print Debug Messages")]
     [switch]$Details = $False,
-    [switch]$Headered = $False
+    [switch]$Headered = $False,
+    [switch]$Normalize = $False
 )
 $ErrorActionPreference = "Stop"
 
@@ -14,6 +15,10 @@ $MAGIC_SIZE = 0x20;
 $MAGIC_BLOCK_TRAILER = 0xAA55
 $JUMP_BOOT = 0x9076EB
 $EXTFAT_SIG = "EXFAT   "
+
+$EXFAT_VOLUME_LABEL_RECORD = [byte]0x83, 5, 0x65, 0, 0x78, 0, 0x66, 0, 0x61, 0, 0x74, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+$SCE_IO_TRASH_DIR_RECORD = [byte]0x85, 2, 0x26, 2, 0x16, 0, 0, 0, 0xD5,0xAA, 0x56, 0x52, 0xD5, 0xAA, 0x56, 0x52, 0xD5, 0xAA, 0x56, 0x52, 0, 0, 0x80, 0x80, 0x80, 0, 0, 0, 0, 0, 0, 0, 0xC0, 3, 0, 0xA, 0xF, 0x23, 0, 0, 0, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0x80, 0, 0, 0, 0, 0, 0, 0xC1, 0, 0x53, 0, 0x63, 0, 0x65, 0, 0x49, 0, 0x6F, 0, 0x54, 0, 0x72, 0, 0x61, 0, 0x73, 0, 0x68, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+
 
 function ReadString([int]$offset, [int]$length, $source = $block, $unicode = $False)
 {
@@ -780,15 +785,14 @@ function ReadDirectory($offset, $dirName)
 
         if ($cur.IsDirectory)
         {
-            Write-Host -ForegroundColor Cyan $cur.FileName
+            Write-Host -ForegroundColor Cyan "$($cur.FileName) <DIR>"
             $cur.ParentDir = $dirName
             $Global:stack.Push($cur)
         }
         else
-        {
+        {cd 
             if ($cur.Contiguous)
             {
-                #Write-Host "YOOOOOOOOOOOOOOOOOOOOOP"
                 $md5 =  $(InternalFileHash -offset $cur.FileOffset -length $cur.ValidDataLength -algorithm "MD5").Hash
                 if ($Extract)
                 {
@@ -924,19 +928,29 @@ function ReadExFATPartition($num)
     $bytesPerSector = 1 -shl $block[108]
     $sectorsPerCluster = 1 -shl $block[109]
     $volumeSerial = Read4 -offset 100
+    
     $fsRevision = Read2 -offset 104
     $volFlags = Read2 -offset 106
     $percentInUse = $block[112];
     $heapOffsetBytes = $heapOffset * $bytesPerSector + $volumeOS
     $clusterSize = $bytesPerSector * $sectorsPerCluster
     $rootDirOffsetBytes = $heapOffsetBytes + (($rootDirCluster - 2) * $clusterSize);
-    
     if ($percentInUse -eq 255)
     {
         $percentInUse = "Unavailable (0xFF)"
     }
+    if ($global:curWritable)
+    {
+        $global:volumeSerialOffset = $partOffsetBytes + 100;
+        $global:writablePartOffset = $partOffsetBytes;
+        $global:writablePartLen = $volumeSize * $bytesPerSector;
+        $global:writableRootDirOS = $heapOffsetBytes + (($rootDirCluster - 2) * $clusterSize);
+        $global:writableHeapOS = $heapOffset * $bytesPerSector + $volumeOS;
+        $global:writableHeapLen = $clusterCnt * $sectorsPerCluster * $bytesPerSector;
+    }
     $bootSig = Read2 -offset 510
     $cluster = [Byte[]]::new($sectorsPerCluster * $bytesPerSector);
+    [uint32]$calcChecksum = BootChecksum -offset $volumeOS -zeroOut $false
 
 
     Write-Host "Reading Partition #$($num)"
@@ -968,6 +982,7 @@ function ReadExFATPartition($num)
     Write-Host ([String]::Format("DriveSelect: 0x{0:X}", $block[111]))
     Write-Host "PercentInUse: $($percentInUse)"
     CheckAndPrint -label "BootSignature:" -val $([String]::Format("0x{0:X4}", $bootSig)) -cond $($bootSig -eq $MAGIC_BLOCK_TRAILER)
+    Write-Host ([String]::Format("Calculated Boot Sector Checksum: 0x{0:X8}", $calcChecksum));
     Write-Host
 
     ReadAllDirs -start $rootDirCluster
@@ -988,6 +1003,53 @@ function CheckAllZeros([long]$offset, [long]$len)
     return $true
 }
 
+function BootChecksum([long]$offset, [bool]$zeroOut=$true)
+{
+    [uint32]$NumberOfBytes = 512 * 11;
+    [uint32]$Checksum = 0;
+    [uint32]$Index = 0;
+
+    $x = $fs.Seek($offset, [System.IO.SeekOrigin]::Begin);
+    $buffer = [Byte[]]::new($NumberOfBytes);
+
+    $x = $fs.Read($buffer,0,$buffer.Length)
+
+    if ($zeroOut)
+    {
+        $buffer[100] = 0;
+        $buffer[101] = 0;
+        $buffer[102] = 0;
+        $buffer[103] = 0;
+    }
+
+    for ($Index; $Index -lt $NumberOfBytes; $Index++)
+    {
+        if (($Index -eq 106) -or ($Index -eq 107) -or ($Index -eq 112))
+        {
+            continue;
+        }
+        $theByte = $buffer[$Index];
+        $theByte = $theByte -as [uint32]
+        $theShift = $Checksum -shr 1;
+        $theShift = $theShift -as [uint32]
+        [uint32]$ph = 0x80000000L
+
+        if ($Checksum -band 1)
+        {
+            #Write-Host -NoNewline ([string]::Format("0x{0:X8} + 0x{1:X8} + 0x{2:X8} = ", $ph, $theShift, $theByte))
+            $Checksum = $theShift + $theByte + $ph  
+        }
+        else
+        {
+            #Write-Host -NoNewline ([string]::Format("0x{0:X8} + 0x{1:X8} = ", $theShift, $theByte))
+            $Checksum = $theShift + $theByte;
+        }
+        #Write-Host ([string]::Format("0x{0:X8}", $Checksum));
+    }
+
+    return $Checksum;
+}
+
 if ($romFile.Contains("\")) {
 [System.IO.FileInfo]$fi = New-Object System.IO.FileInfo -ArgumentList "$($romFile)";
 } else {
@@ -1003,6 +1065,7 @@ $block = New-Object "Byte[]" 512
 $magic = ReadString -offset $MAGIC_OFFSET -length $MAGIC_SIZE
 $version = Read4 -offset 0x20
 $size = Read4 -offset 0x24
+$global:writablePartOffset = 0
 
 
 
@@ -1036,40 +1099,29 @@ while (ReadPartitionEntry -offset $peos)
     $peos = $peos + 17
 }
 
-$grw0 = ReadPartitionEntry -offset 0x61
+$peNum--;
+$peos = 0x50;
 
-
-$x = ReadPartitionEntry -offset 0x50
-
-if ($global:partitionType -eq 7)
+for ($i = 1; $i -le $peNum; $i++)
 {
-    ReadExFATPartition -num 1
-}
-
-if ($grw0)
-{
-    Write-Host 
-    Write-Host "///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////"
-    Write-Host
-
     ReadBlock -blockNum 0
-    $x = ReadPartitionEntry -offset 0x61
-
+    $x = ReadPartitionEntry -offset $peos
+    if ($global:pCodeName.Contains("grw0"))
+    {
+        $global:curWritable = $true;
+    }
+    else
+    {
+        $global:curWritable = $false;
+    }
     if ($global:partitionType -eq 7)
     {
-        ReadExFATPartition -num 2
+        
+        ReadExFATPartition -num $i
     }
-}
-
-ReadBlock -blockNum 0
-if (ReadPartitionEntry -offset 0x72)
-{
-    if ($global:partitionType -eq 0xDA)
+    elseif ($global:partitionType -eq 0xDA)
     {
-        Write-Host 
-        Write-Host "///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////"
-        Write-Host
-        Write-Host "Reading Partition #3"
+        Write-Host "Reading Partition #$($i) (RAW) @ 0x$([String]::Format("{0:X} Size: {1} bytes", $global:partitionOffset * 512, $global:partitionSize * 512))"
         $az = CheckAllZeros -offset $($global:partitionOffset * 512) -len $($global:partitionSize * 512);
 
         if ($az)
@@ -1081,4 +1133,203 @@ if (ReadPartitionEntry -offset 0x72)
             Write-Host "Partition contains some meaningfull data."
         }
     }
+
+    Write-Host 
+    Write-Host "///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////"
+    Write-Host
+    $peos = $peos + 17;
+
+}
+
+if ($Normalize -and $global:writablePartOffset)
+{
+    Write-Host
+    Write-Host "==========================================================================================================================="
+    Write-Host "Normalizing Dump"
+    Write-Host "==========================================================================================================================="
+    Write-Host
+
+    $x = $fs.Seek($offset, [System.IO.SeekOrigin]::Begin);
+    $inFile = $romFile.Substring($romFile.LastIndexOf("\"), $($romFile.LastIndexOf(".") - $romFile.LastIndexOf("\")));
+    $firom = New-Object -TypeName System.IO.FileInfo -ArgumentList "$($romFile)";
+    $fi = New-Object -TypeName System.IO.FileInfo -ArgumentList "$($firom.Directory)\$($inFile)_norm.psv";
+    Write-Host "Writing to $($fi.Name)"
+    $fos = $fi.Create();
+    $numRomBlocks = $global:writablePartOffset / $block.Length
+    Write-Host "Copying gro0 partition, this may take a while..."
+    for ($i=0; $i -lt $numRomBlocks; $i++)
+    {
+        ReadBlock -blockNum $i
+        $fos.Write($block, 0, $block.Count);
+    }
+    
+    $numRamBlocks = $global:writablePartLen / $block.Length
+    $rootDirIdx = $global:writableRootDirOS / $block.Length - $numRomBlocks
+    $allocTable1Idx = $global:writableHeapOS / $block.Length - $numRomBlocks
+    Write-Host "Normalizing and writing grw0 partition..."
+
+    for ($i=0; $i -lt $numRamBlocks; $i++)
+    {
+        ReadBlock -blockNum $($i + $numRomBlocks);
+        if ($i -eq 0)
+        {
+            Write-Host "Zeroing out volume serial number";
+            $block[100] = 0;
+            $block[101] = 0;
+            $block[102] = 0;
+            $block[103] = 0;
+            Write-Host -NoNewline "Calculating new boot sector checksum... "
+            [uint32]$cs = BootChecksum -offset $global:writablePartOffset
+            Write-Host ([String]::Format("0x{0:X8}", $cs));  
+        }
+        elseif ($i -eq 11)
+        {
+            Write-Host "Writing new checksum in the Main Boot Checksum sector...";
+            $byte0 = $cs -band 0xFF;
+            $byte1 = ($cs -shr 8) -band 0xFF
+            $byte2 = ($cs -shr 16) -band 0xFF
+            $byte3 = ($cs -shr 24) -band 0xFF
+
+            for ($j=0; $j -lt $block.Length; $j = $j + 4)
+            {
+                $block[$j] = $byte0;
+                $block[$j+1] = $byte1;
+                $block[$j+2] = $byte2;
+                $block[$j+3] = $byte3;
+            }
+        }
+        elseif ($i -eq 12)
+        {
+            Write-Host "Zeroing out volume serial number of backup boot sector..."
+            $block[100] = 0;
+            $block[101] = 0;
+            $block[102] = 0;
+            $block[103] = 0;
+            Write-Host -NoNewline "Calculating new backup boot sector checksum... "
+            [uint32]$bcs = BootChecksum -offset $($global:writablePartOffset+12*512)
+            Write-Host ([String]::Format("0x{0:X8}", $bcs));
+        }
+        elseif ($i -eq 23)
+        {
+            Write-Host "Writing new checksum in the Backup Boot Checksum sector...";
+            $byte0 = $bcs -band 0xFF;
+            $byte1 = ($bcs -shr 8) -band 0xFF
+            $byte2 = ($bcs -shr 16) -band 0xFF
+            $byte3 = ($bcs -shr 24) -band 0xFF
+
+            for ($j=0; $j -lt $block.Length; $j = $j + 4)
+            {
+                $block[$j] = $byte0;
+                $block[$j+1] = $byte1;
+                $block[$j+2] = $byte2;
+                $block[$j+3] = $byte3;
+            }
+        }
+        elseif ($i -eq $allocTable1Idx)
+        {
+            Write-Host "Rewriting Allocation table #1..."
+            $block[0] = 0x1F
+            for ($j=1; $j -lt $block.Length; $j++)
+            {
+                $block[$j] = 0;
+            }
+        }
+        elseif ($i -eq $rootDirIdx)
+        {
+            Write-Host "Removing unpredictable directory entries..."
+            $de = [Byte[][]]::new(5);
+            $de[0] = [Byte[]]::new(32);
+            $de[1] = [Byte[]]::new(32);
+            $de[2] = [Byte[]]::new(32);
+            $de[3] = [Byte[]]::new(32);
+            $de[4] = [Byte[]]::new(32);
+
+            for ($outer = 0; $outer -lt $de.Length; $outer++)
+            {
+                $idx = 0;
+                for ($inner = $outer*32; $inner -lt $($outer+1)*32; $inner++)
+                {
+                    $de[$outer][$idx] = $block[$inner];
+                    $idx++;
+                }
+            }
+
+            if ($de[0][0] -ne 0x83)
+            {
+                Write-Host "Partition doesn't start with volume label: exfat...";
+                Write-Host "Writing volume label: exfat";
+                for ($j = 0; $j -lt $de[0].Length; $j++)
+                {
+                    $block[$j] = $EXFAT_VOLUME_LABEL_RECORD[$j];
+                }
+            }
+            else
+            {
+                for ($j = 0; $j -lt $de[0].Length; $j++)
+                {
+                    $block[$j] = $de[0][$j];
+                }
+                $de[0] = $de[1];
+                $de[1] = $de[2];
+                $de[2] = $de[3];
+                $de[3] = $de[4];
+                $de[4] = [byte[]]::new(32);
+             
+            }
+
+
+            for ($outer = 0; $outer -lt $de.Length; $outer++)
+            {
+                $idx = 0;
+                if ($de[$outer][0] -eq 0x85 -or $de[$outer][0] -eq 0)
+                {
+                    break;
+                }
+
+                #start at 2nd directory entry
+                for ($inner = $($outer+1)*32; $inner -lt $($outer+2)*32; $inner++)
+                {
+                    $block[$inner] =  $de[$outer][$idx];
+                    $idx++;
+                }
+            }
+
+            $idx = 0
+            Write-Host "Writing empty SceIoTrash folder..."
+            $limit = $inner + 96;
+            for ($inner; $inner -lt $limit; $inner++)
+            {
+                $block[$inner] =  $SCE_IO_TRASH_DIR_RECORD[$idx]
+                $idx++;
+            }
+
+            for ($inner; $inner -lt $block.Length; $inner++)
+            {
+                $block[$inner] = 0;
+            }
+
+           
+        }
+        if ($i -gt $rootDirIdx)
+        {
+            for ($j = 0; $j -lt $block.Length; $j++)
+            {
+                $block[$j] = 0
+            }
+        }
+        
+
+        $fos.Write($block, 0, $block.Count);
+    }
+
+    Write-Host "Writing Empty Partition"
+    $emptyPartOffset = $($global:writablePartOffset + $global:writablePartLen)
+    $numEmptyBlocks = $($($fs.Length - $emptyPartOffset) / $block.Length);
+    for ($i=0; $i -lt $numEmptyBlocks; $i++)
+    {
+        ReadBlock -blockNum $($i + $emptyPartOffset / $block.Length)
+        $fos.Write($block, 0, $block.Count);
+    }
+
+    $fos.Close();
 }
