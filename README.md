@@ -12,6 +12,7 @@ ReadPsv.PS1 -romFile [Path to psv file] [-Extract] [-Details] [-Headered] [-Norm
 - Details: Print some debug messages, mainly for development purposes.
 - Headered: Use this flag if you're running this on a file that hasn't been stripped by [psvstrip](https://github.com/Kippykip/PSVStrip) when in doubt use this flag.
 - Normalized: Use this flag when the original dump contains a writable (aka grw0) partition. This will create a second file (original file name with `_norm.psv` appended) with some variable fields removed from the grw0 partition. I have tried my best to stay as true as possible to an "unplayed/sealed" PSVita game all checksums were recalculated so the partition should act like a valid exFAT partition.
+- To output to a file instead of the console, use the `6>` redirection operator.
 
 ## Fields Affected by the normalization process
 
