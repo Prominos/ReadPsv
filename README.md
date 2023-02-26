@@ -25,6 +25,7 @@ See [https://learn.microsoft.com/en-us/windows/win32/fileio/exfat-specification]
 - The `Up-case Table` is left untouched, the vita seems to use Microsoft's recommended Up-case Table and I highly doubt this will ever be different.
 - The root directory record cluster is changed. I make sure they all start with a `Volume Label` called `exfat` (that's what I saw in an unplayed dump but it seems to be removed when this partition is first written.) Then I just copy paste the `FAT table directory record`, `Primary Allocation bitmap directory record`, `Secondary Allocation bitmap directory record`, `Up-case table directory record`. I assume they always appear in the same order and always allocate the same cluster index (again this might be wrong).
 - I remove every file and folder directory records from the root folder and add a single empty folder called `SceIoTrash` (this is the content I see in an unplayed dump). The thing to note here is that all the timestamps on this folder are fixed and faked.
+- I reset to 0 all clusters that were originally allocated to files in this partition. Only clusters 2,3,4,5,6 are left as-is although cluster 6 is also all 0's because it represents an empty folder.
 - The read only partition (aka gro0) is left as-is.
 - The trailing raw (empty) partition is left as-is.
 
