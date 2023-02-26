@@ -790,7 +790,7 @@ function ReadDirectory($offset, $dirName)
             $Global:stack.Push($cur)
         }
         else
-        {cd 
+        { 
             if ($cur.Contiguous)
             {
                 $md5 =  $(InternalFileHash -offset $cur.FileOffset -length $cur.ValidDataLength -algorithm "MD5").Hash
