@@ -5,7 +5,9 @@
     [Parameter(HelpMessage="Print Debug Messages")]
     [switch]$Details = $False,
     [switch]$Headered = $False,
-    [switch]$Normalize = $False
+    [switch]$Normalize = $False,
+    [switch]$Minimal = $False,
+    [Parameter(Mandatory=$False)][String]$ExportPart
 )
 $ErrorActionPreference = "Stop"
 
@@ -1050,10 +1052,36 @@ function BootChecksum([long]$offset, [bool]$zeroOut=$true)
     return $Checksum;
 }
 
+function ExportPartition([long]$offset, [long]$len, [string]$name)
+{
+    $x = $fs.Seek($offset, [System.IO.SeekOrigin]::Begin);
+
+    $inFile = $romFile.Substring($romFile.LastIndexOf("\"), $($romFile.LastIndexOf(".") - $romFile.LastIndexOf("\")));
+    $firom = New-Object -TypeName System.IO.FileInfo -ArgumentList "$($romFile)";
+    $fi = New-Object -TypeName System.IO.FileInfo -ArgumentList "$($firom.Directory)\$($inFile).$($name).img";
+    $fos = $fi.Create();
+    [long]$totalCount = 0
+    $count = 0
+    $buffer = [byte[]]::new(64*1024)
+    while ($totalCount -lt $len)
+    {
+        $count = $fs.Read($buffer, 0, $buffer.Length)
+        $totalCount = $totalCount + $count;
+        $fos.Write($buffer, 0, $count);
+    }
+    $fos.Close();
+}
+
 if ($romFile.Contains("\")) {
 [System.IO.FileInfo]$fi = New-Object System.IO.FileInfo -ArgumentList "$($romFile)";
 } else {
 [System.IO.FileInfo]$fi = New-Object System.IO.FileInfo -ArgumentList "$(pwd)\$romFile";
+}
+
+if (-not [String]::IsNullOrEmpty($ExportPart) -and $ExportPart -ne "gro0" -and $ExportPart -ne "grw0" -and $ExportPart -ne "all")
+{
+    Write-Error "Unrecognized argument: $($ExportPart) for parameter -ExportPath valid values are gro0, grw0 or all"
+    exit
 }
 
 $curBlock = -1;
@@ -1095,6 +1123,18 @@ $peNum = 1
 while (ReadPartitionEntry -offset $peos)
 {
     PrintPartitionInfos -num $peNum
+
+    if ($global:pCodeName.Contains("grw0") -and $($ExportPart -eq "grw0" -or $ExportPart -eq "all"))
+    {
+        Write-Host "Found grw0 partition. Exporting..."
+        ExportPartition -offset $($global:partitionOffset * 512) -len $($global:partitionSize * 512) -name "grw0"
+    }
+    elseif ($global:pCodeName.Contains("gro0") -and $($ExportPart -eq "gro0" -or $ExportPart -eq "all"))
+    {
+        Write-Host "Found gro0 partition. Exporting..."
+        ExportPartition -offset $($global:partitionOffset * 512) -len $($global:partitionSize * 512) -name "gro0"
+    }
+
     $peNum++
     $peos = $peos + 17
 }
@@ -1141,18 +1181,32 @@ for ($i = 1; $i -le $peNum; $i++)
 
 }
 
-if ($Normalize -and $global:writablePartOffset)
+if ($($Normalize -or $Minimal) -and $global:writablePartOffset)
 {
     Write-Host
     Write-Host "==========================================================================================================================="
-    Write-Host "Normalizing Dump"
+    if ($Minimal)
+    {
+      Write-Host  "Normalizing Dump (Minimal Change Mode)"
+    }
+    else
+    {
+        Write-Host "Normalizing Dump (Normal Mode)"
+    }
     Write-Host "==========================================================================================================================="
     Write-Host
 
     $x = $fs.Seek($offset, [System.IO.SeekOrigin]::Begin);
     $inFile = $romFile.Substring($romFile.LastIndexOf("\"), $($romFile.LastIndexOf(".") - $romFile.LastIndexOf("\")));
     $firom = New-Object -TypeName System.IO.FileInfo -ArgumentList "$($romFile)";
-    $fi = New-Object -TypeName System.IO.FileInfo -ArgumentList "$($firom.Directory)\$($inFile)_norm.psv";
+    if ($Minimal)
+    {
+        $fi = New-Object -TypeName System.IO.FileInfo -ArgumentList "$($firom.Directory)\$($inFile)_min.psv";
+    }
+    else
+    {
+        $fi = New-Object -TypeName System.IO.FileInfo -ArgumentList "$($firom.Directory)\$($inFile)_norm.psv";
+    }
     Write-Host "Writing to $($fi.Name)"
     $fos = $fi.Create();
     $numRomBlocks = $global:writablePartOffset / $block.Length
@@ -1225,7 +1279,7 @@ if ($Normalize -and $global:writablePartOffset)
                 $block[$j+3] = $byte3;
             }
         }
-        elseif ($i -eq $allocTable1Idx)
+        elseif ($i -eq $allocTable1Idx -and -not $Minimal)
         {
             Write-Host "Rewriting Allocation table #1..."
             $block[0] = 0x1F
@@ -1234,7 +1288,7 @@ if ($Normalize -and $global:writablePartOffset)
                 $block[$j] = 0;
             }
         }
-        elseif ($i -eq $rootDirIdx)
+        elseif ($i -eq $rootDirIdx -and -not $Minimal)
         {
             Write-Host "Removing unpredictable directory entries..."
             $de = [Byte[][]]::new(5);
@@ -1310,7 +1364,7 @@ if ($Normalize -and $global:writablePartOffset)
 
            
         }
-        if ($i -gt $rootDirIdx)
+        if ($i -gt $rootDirIdx -and -not $Minimal)
         {
             for ($j = 0; $j -lt $block.Length; $j++)
             {
