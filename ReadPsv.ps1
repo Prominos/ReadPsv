@@ -1222,6 +1222,9 @@ function ExportPartition([long]$offset, [long]$len, [string]$name)
     $fos.Close();
 }
 
+Write-Host "ReadPsv V1.1.0"
+Write-Host
+
 if ($IsLinux)
 {
     $global:separator = "/"
