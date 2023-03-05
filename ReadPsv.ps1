@@ -24,6 +24,8 @@ $SCE_IO_TRASH_DIR_RECORD = [byte]0x85, 2, 0x26, 2, 0x16, 0, 0, 0, 0xD5,0xAA, 0x5
 
 function ReadString([int]$offset, [int]$length, $source = $block, $unicode = $False)
 {
+    #Write-Host ([string]::Format("GetString: @ 0x{0:X} | Len => {1} | source Len => {2} | unicode => {3}", $offset, $length, $source.Length, $unicode))
+
     if ($unicode)
     {
         return [System.Text.Encoding]::Unicode.GetString($source, $offset, $length);
@@ -158,11 +160,11 @@ function ReadBlock($blockNum)
 function ReadCluster($index)
 {
     
-    $clusterOffset = $heapOffsetBytes + ($index-2)*$clusterSize
+    $clusterOffset = $global:heapOffsetBytes + ($index-2)*$clusterSize
 
     $x = $fs.Seek($clusterOffset, [System.IO.SeekOrigin]::Begin);
     $x = $fs.Read($cluster, 0 ,$cluster.Length);
-    $curCluster = $index
+    $global:curCluster = $index
 }
 
 function CheckAndPrint($label, $val, $cond)
@@ -488,7 +490,7 @@ function ReadUpCaseTableDirectoryRecord($offset)
 {
     $tableChecksum = Read4 -offset $($offset + 4) -source $cluster
     $firstCluster = Read4 -offset $($offset + 20) -source $cluster
-    $clusterOS = $heapOffsetBytes + ($firstCluster-2) * $clusterSize
+    $clusterOS = $global:heapOffsetBytes + ($firstCluster-2) * $clusterSize
     $dataLength = Read8 -offset $($offset + 24) -source $cluster
 
     if ($Details)
@@ -507,7 +509,7 @@ function ReadStreamExtensionDirectoryRecord($offset)
     $validDataLength = Read8 -offset $($offset + 8) -source $cluster
     $firstCluster = Read4 -offset $($offset + 20) -source $cluster
     #$firstCluster = $firstCluster + 2;
-    $clusterOS = $heapOffsetBytes + ($firstCluster-2) * $clusterSize
+    $clusterOS = $global:heapOffsetBytes + ($firstCluster-2) * $clusterSize
     $dataLength = Read8 -offset $($offset + 24) -source $cluster
     
 
@@ -552,31 +554,76 @@ function ReadFileNameDirectoryRecord($offset)
     return $filename
 }
 
-function InternalFileHash($offset, $length, $algorithm)
+function Cleanup()
 {
-    #Write-Host ([String]::Format("Calculating Hash for 0x{0:X} length: {1}", $offset, $length));
-    $fileBuf = [byte[]]::new($length)
-    $x = $fs.Seek($offset, [System.IO.SeekOrigin]::Begin);
-    $read = 0;
-    while ($read -lt $length)
+    $tmpfile = New-Object System.IO.FileInfo $("$(pwd)\readPSV_tempFile.tmp")
+    if ($tmpfile.Exists)
     {
-        $x = $fs.Read($fileBuf, $read, $fileBuf.Length)
-        $read = $read + $x
+        $tmpfile.Delete();
     }
-    $memStream = New-Object -TypeName System.IO.MemoryStream -ArgumentList $fileBuf, $False
-    Get-FileHash -InputStream $memStream -Algorithm $algorithm
+    try
+    {
+        $fs.Close();
+    }
+    catch {}
 }
 
-function DumpFile($filename, $offset, $length)
+function InternalFileHash([long]$offset, [long]$length, $algorithm)
 {
-    $fileBuf = [byte[]]::new($length)
+    #Write-Host ([String]::Format("Calculating Hash for 0x{0:X} length: {1}", $offset, $length));
     $x = $fs.Seek($offset, [System.IO.SeekOrigin]::Begin);
-    $read = 0;
-    while ($read -lt $length)
+    if ($length -gt [int32]::MaxValue)
     {
-        $x = $fs.Read($fileBuf, $read, $fileBuf.Length)
-        $read = $read + $x
+        #Internal file is too big dump do disk first calculate md5 then delete
+        $fileBuf = New-Object byte[] $(1024*1024)
+        $tmpfile = New-Object System.IO.FileInfo $("$(pwd)\readPSV_tempFile.tmp")
+        $fos = $tmpfile.Create()
+        $read = 0;
+        [long]$totalRead = 0L;
+        while ($totalRead -lt $length)
+        {
+            $leftToRead = $length - $totalRead;
+            $toRead = 0;
+
+            if ($leftToRead -lt $fileBuf.Length)
+            {
+                $toRead = $leftToRead;
+            }
+            else
+            {
+                $toRead = $fileBuf.Length;
+            }
+
+            $read = $fs.Read($fileBuf, 0, $fileBuf.Length)
+            $fos.Write($fileBuf, 0, $toRead)
+            $totalRead = $totalRead + $read;
+        }
+        $fos.Close();
+
+        Get-FileHash "$($tmpfile.FullName)" -Algorithm $algorithm
+        $tmpfile.Delete();
     }
+    else
+    {
+        #In Memory MD5
+        $fileBuf = New-Object byte[] $length
+        $read = 0;
+        while ($read -lt $length)
+        {
+            $x = $fs.Read($fileBuf, $read, $fileBuf.Length)
+            $read = $read + $x
+        }
+        $memStream = New-Object -TypeName System.IO.MemoryStream -ArgumentList $fileBuf, $False
+        Get-FileHash -InputStream $memStream -Algorithm $algorithm
+    }
+    
+    
+    
+}
+
+function DumpFile($filename, [long]$offset, [long]$length)
+{
+    #Write-Host "dump len: $($length)"
     $tpDir =  $dumpDir + "\" + $Global:dir
     $diTpDir = New-Object -TypeName System.IO.DirectoryInfo -ArgumentList $tpDir
     if (-Not $diTpDir.Exists)
@@ -585,7 +632,29 @@ function DumpFile($filename, $offset, $length)
     }
     $dumpFileName =  $dumpDir + "\" + $Global:dir + "\" + $filename
     $fsOut = [System.IO.File]::Create($dumpFileName)
-    $fsOut.Write($fileBuf, 0, $fileBuf.Length)
+    $fileBuf = New-Object byte[] $(1024*1024)
+    $x = $fs.Seek($offset, [System.IO.SeekOrigin]::Begin);
+    $read = 0;
+    [long]$totalRead = 0L;
+    while ($totalRead -lt $length)
+    {
+        $leftToRead = $length - $totalRead;
+        $toRead = 0;
+
+        if ($leftToRead -lt $fileBuf.Length)
+        {
+            $toRead = $leftToRead;
+        }
+        else
+        {
+            $toRead = $fileBuf.Length;
+        }
+
+        $read = $fs.Read($fileBuf, 0, $fileBuf.Length)
+        $totalRead = $totalRead + $read
+        $fsOut.Write($fileBuf, 0, $toRead)
+    }
+    
     $fsOut.Close();
 }
 
@@ -601,7 +670,7 @@ function ReadAllocationBitmapDirectoryRecord($offset)
         $bitmapFlags = "Second Allocation Bitmap (1)"
     }
     $firstCluster = Read4 -offset $($offset + 20) -source $cluster
-    $clusterOS = $heapOffsetBytes + ($firstCluster-2) * $clusterSize
+    $clusterOS = $global:heapOffsetBytes + ($firstCluster-2) * $clusterSize
     $dataLength = Read8 -offset $($offset + 24) -source $cluster
 
     if($Details)
@@ -614,6 +683,8 @@ function ReadAllocationBitmapDirectoryRecord($offset)
 
 function ReadDirectoryRecord($offset)
 {
+    #$offset = CheckWithinCluster -offset $offset
+
     $entryType = $cluster[$offset]
     $Global:nextOffset = 32
 
@@ -650,6 +721,14 @@ function ReadDirectoryRecord($offset)
     }
 
     $typeName =  GetDirectoryEntryTypeName -typeCode $typeCode -typeImportance $typeImportance -typeCategory $typeCategory
+
+    if ($typeName -eq "Invalid")
+    {
+        $byteAddr = $global:heapOffsetBytes + $global:curCluster * $clusterSize + $offset;
+        Write-Error $([string]::Format("Error getting directory entry type name @ 0x{5:X} 0x{3:X} (Cluster 0x{4:X}) typeCode => {0} | typeImportance => {1} | typeCategory => {2} ", $typeCode, $typeImportance, $typeCategory, $offset, $global:curCluster, $byteAddr))
+        Cleanup
+        Exit
+    }
 
     if ($Details)
     {
@@ -724,6 +803,10 @@ function ReadFileDirectoryRecordSet($offset)
     {
         Write-Host
     }
+    if (-not $(CheckWithinCluster -offset $($offset + 32)))
+    {
+        $offset = $offset - $clusterSize;
+    }
     ReadStreamExtensionDirectoryRecord -offset $($offset + 32)
     if ($Details)
     {
@@ -735,6 +818,10 @@ function ReadFileDirectoryRecordSet($offset)
 
     for ($i = 0; $i -lt $secondaryCount; $i++)
     {
+        if (-not $(CheckWithinCluster -offset $($offset + 64 + $i*32)))
+        {
+            $offset = $offset - $clusterSize;
+        }
         $fn = ReadFileNameDirectoryRecord -offset $($offset + 64 + $i*32)
         if ($Details)
         {
@@ -767,12 +854,24 @@ function ReadDirectory($offset, $dirName)
     $Global:curDir.Enqueue($dirName)
     $Global:dir = $dirName;
 
+    $prevCluster = $global:curCluster;
 
     while (ReadDirectoryRecord -offset $dirEntryOS)
     {
+        if ($prevCluster -ne $global:curCluster)
+        {
+            #adjust if there was a change of cluster in ReadDirectoryRecord
+            $dirEntryOS = 0;
+        }
         #Write-Host "Nextoffset $($Global:nextOffset)"
         $dirEntryOS = $dirEntryOS + $Global:nextOffset;
+        if (-not $(CheckWithinCluster -offset $dirEntryOS))
+        {
+            $dirEntryOS = $dirEntryOS - $clusterSize;
+        }
+
         #Write-Host "Cluster offset: $($dirEntryOS) / $($clusterSize)"
+        $prevCluster = $global:curCluster;
     }
 
     Write-Host "==========================================================================================================================="
@@ -795,7 +894,7 @@ function ReadDirectory($offset, $dirName)
         { 
             if ($cur.Contiguous)
             {
-                $md5 =  $(InternalFileHash -offset $cur.FileOffset -length $cur.ValidDataLength -algorithm "MD5").Hash
+                $md5 =  $(InternalFileHash -offset $cur.FileOffset -length $($cur.ValidDataLength -as [long]) -algorithm "MD5").Hash
                 if ($Extract)
                 {
                     DumpFile -filename $cur.FileName -offset $cur.FileOffset -length $cur.ValidDataLength
@@ -934,9 +1033,9 @@ function ReadExFATPartition($num)
     $fsRevision = Read2 -offset 104
     $volFlags = Read2 -offset 106
     $percentInUse = $block[112];
-    $heapOffsetBytes = $heapOffset * $bytesPerSector + $volumeOS
+    $global:heapOffsetBytes = $heapOffset * $bytesPerSector + $volumeOS
     $clusterSize = $bytesPerSector * $sectorsPerCluster
-    $rootDirOffsetBytes = $heapOffsetBytes + (($rootDirCluster - 2) * $clusterSize);
+    $rootDirOffsetBytes = $global:heapOffsetBytes + (($rootDirCluster - 2) * $clusterSize);
     if ($percentInUse -eq 255)
     {
         $percentInUse = "Unavailable (0xFF)"
@@ -946,7 +1045,7 @@ function ReadExFATPartition($num)
         $global:volumeSerialOffset = $partOffsetBytes + 100;
         $global:writablePartOffset = $partOffsetBytes;
         $global:writablePartLen = $volumeSize * $bytesPerSector;
-        $global:writableRootDirOS = $heapOffsetBytes + (($rootDirCluster - 2) * $clusterSize);
+        $global:writableRootDirOS = $global:heapOffsetBytes + (($rootDirCluster - 2) * $clusterSize);
         $global:writableHeapOS = $heapOffset * $bytesPerSector + $volumeOS;
         $global:writableHeapLen = $clusterCnt * $sectorsPerCluster * $bytesPerSector;
     }
@@ -1052,22 +1151,59 @@ function BootChecksum([long]$offset, [bool]$zeroOut=$true)
     return $Checksum;
 }
 
+function CheckWithinCluster($offset)
+{
+    if ($offset -ge $clusterSize)
+    {
+        if ($Details)
+        {
+            Write-Host -ForegroundColor Yellow "Warning: We've reached a cluster boundary loading next cluster in memory."
+        }
+        
+        $offset = $offset - $clusterSize
+        ReadCluster -index $($global:curCluster + 1)
+        return $false
+    }
+
+    return $true
+}
+
 function ExportPartition([long]$offset, [long]$len, [string]$name)
 {
     $x = $fs.Seek($offset, [System.IO.SeekOrigin]::Begin);
-
-    $inFile = $romFile.Substring($romFile.LastIndexOf("\"), $($romFile.LastIndexOf(".") - $romFile.LastIndexOf("\")));
-    $firom = New-Object -TypeName System.IO.FileInfo -ArgumentList "$($romFile)";
+    if ($romFile.Contains("\"))
+    {
+        $inFile = $romFile.Substring($romFile.LastIndexOf("\"), $($romFile.LastIndexOf(".") - $romFile.LastIndexOf("\")));
+        $firom = New-Object -TypeName System.IO.FileInfo -ArgumentList "$($romFile)";
+    }
+    else
+    {
+        $inFile = $romFile.Substring(0, $romFile.LastIndexOf("."));
+        $firom = New-Object -TypeName System.IO.FileInfo -ArgumentList "$($PSScriptRoot)\$($romFile)";
+    }
+    
     $fi = New-Object -TypeName System.IO.FileInfo -ArgumentList "$($firom.Directory)\$($inFile).$($name).img";
     $fos = $fi.Create();
-    [long]$totalCount = 0
+    [long]$totalCount = 0L
     $count = 0
     $buffer = [byte[]]::new(64*1024)
     while ($totalCount -lt $len)
     {
+        $leftToRead = $len - $totalCount;
+        $toRead = 0;
+
+        if ($leftToRead -lt $buffer.Length)
+        {
+            $toRead = $leftToRead;
+        }
+        else
+        {
+            $toRead = $buffer.Length
+        }
+
         $count = $fs.Read($buffer, 0, $buffer.Length)
         $totalCount = $totalCount + $count;
-        $fos.Write($buffer, 0, $count);
+        $fos.Write($buffer, 0, $toRead);
     }
     $fos.Close();
 }
@@ -1083,6 +1219,8 @@ if (-not [String]::IsNullOrEmpty($ExportPart) -and $ExportPart -ne "gro0" -and $
     Write-Error "Unrecognized argument: $($ExportPart) for parameter -ExportPath valid values are gro0, grw0 or all"
     exit
 }
+
+Cleanup
 
 $curBlock = -1;
 $block = New-Object "Byte[]" 512
@@ -1197,8 +1335,17 @@ if ($($Normalize -or $Minimal) -and $global:writablePartOffset)
     Write-Host
 
     $x = $fs.Seek($offset, [System.IO.SeekOrigin]::Begin);
-    $inFile = $romFile.Substring($romFile.LastIndexOf("\"), $($romFile.LastIndexOf(".") - $romFile.LastIndexOf("\")));
-    $firom = New-Object -TypeName System.IO.FileInfo -ArgumentList "$($romFile)";
+    if ($romFile.Contains("\"))
+    {
+        $inFile = $romFile.Substring($romFile.LastIndexOf("\"), $($romFile.LastIndexOf(".") - $romFile.LastIndexOf("\")));
+        $firom = New-Object -TypeName System.IO.FileInfo -ArgumentList "$($romFile)";
+    }
+    else
+    {
+        $inFile = $romFile.Substring(0, $romFile.LastIndexOf("."));
+        $firom = New-Object -TypeName System.IO.FileInfo -ArgumentList "$($PSScriptRoot)\$($romFile)";
+    }
+    
     if ($Minimal)
     {
         $fi = New-Object -TypeName System.IO.FileInfo -ArgumentList "$($firom.Directory)\$($inFile)_min.psv";
@@ -1387,3 +1534,5 @@ if ($($Normalize -or $Minimal) -and $global:writablePartOffset)
 
     $fos.Close();
 }
+
+Cleanup
