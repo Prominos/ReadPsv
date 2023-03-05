@@ -556,7 +556,8 @@ function ReadFileNameDirectoryRecord($offset)
 
 function Cleanup()
 {
-    $tmpfile = New-Object System.IO.FileInfo $("$(pwd)\readPSV_tempFile.tmp")
+    $path = "$(pwd)$($global:separator)readPSV_tempFile.tmp";
+    $tmpfile = New-Object System.IO.FileInfo "$($path)"
     if ($tmpfile.Exists)
     {
         $tmpfile.Delete();
@@ -576,7 +577,7 @@ function InternalFileHash([long]$offset, [long]$length, $algorithm)
     {
         #Internal file is too big dump do disk first calculate md5 then delete
         $fileBuf = New-Object byte[] $(1024*1024)
-        $tmpfile = New-Object System.IO.FileInfo $("$(pwd)\readPSV_tempFile.tmp")
+        $tmpfile = New-Object System.IO.FileInfo $("$(pwd)$($global:separator)readPSV_tempFile.tmp")
         $fos = $tmpfile.Create()
         $read = 0;
         [long]$totalRead = 0L;
@@ -624,13 +625,13 @@ function InternalFileHash([long]$offset, [long]$length, $algorithm)
 function DumpFile($filename, [long]$offset, [long]$length)
 {
     #Write-Host "dump len: $($length)"
-    $tpDir =  $dumpDir + "\" + $Global:dir
+    $tpDir =  "$($dumpDir)$($global:separator)$Global:dir";
     $diTpDir = New-Object -TypeName System.IO.DirectoryInfo -ArgumentList $tpDir
     if (-Not $diTpDir.Exists)
     {
         $diTpDir.Create();
     }
-    $dumpFileName =  $dumpDir + "\" + $Global:dir + "\" + $filename
+    $dumpFileName =  "$($dumpDir)$($global:separator)$($Global:dir)$($global:separator)$($filename)";
     $fsOut = [System.IO.File]::Create($dumpFileName)
     $fileBuf = New-Object byte[] $(1024*1024)
     $x = $fs.Seek($offset, [System.IO.SeekOrigin]::Begin);
@@ -922,7 +923,7 @@ function GetDirname()
     {
         $x = $sb.Append($cloned.Dequeue());
     }
-    return $sb.ToString() + "\";
+    return $sb.ToString() + $global:separator;
 }
 
 function ReadAllDirs($start)
@@ -935,19 +936,19 @@ function ReadAllDirs($start)
         {
             $flag = $false
             $clustOS = $start
-            $dirName = "\"
+            $dirName = $global:separator
         }
         else
         {
             $cur = $Global:stack.Pop()
             $clustOS = $cur.Cluster;
-            if ($cur.ParentDir -eq "\")
+            if ($cur.ParentDir -eq $global:separator)
             {
                 $dirName = $cur.ParentDir + $cur.FileName;
             }
             else
             {
-                $dirName = $cur.ParentDir + "\" + $cur.FileName;
+                $dirName = $cur.ParentDir + $global:separator + $cur.FileName;
             }
         }
         ReadDirectory -offset $clustOS -dirName $dirName 
@@ -1171,18 +1172,31 @@ function CheckWithinCluster($offset)
 function ExportPartition([long]$offset, [long]$len, [string]$name)
 {
     $x = $fs.Seek($offset, [System.IO.SeekOrigin]::Begin);
-    if ($romFile.Contains("\"))
+    if ($romFile.Contains($global:separator))
     {
-        $inFile = $romFile.Substring($romFile.LastIndexOf("\"), $($romFile.LastIndexOf(".") - $romFile.LastIndexOf("\")));
+        $inFile = $romFile.Substring($romFile.LastIndexOf($separator), $($romFile.LastIndexOf(".") - $romFile.LastIndexOf($separator)));
         $firom = New-Object -TypeName System.IO.FileInfo -ArgumentList "$($romFile)";
     }
     else
     {
         $inFile = $romFile.Substring(0, $romFile.LastIndexOf("."));
-        $firom = New-Object -TypeName System.IO.FileInfo -ArgumentList "$($PSScriptRoot)\$($romFile)";
+        $path = "$($PSScriptRoot)$($global:separator)$($romFile)";
+        $firom = New-Object -TypeName System.IO.FileInfo -ArgumentList "$($path)";
+    }
+
+    if ($Details)
+    {
+        Write-Host "InFile path: $($inFile)"
     }
     
-    $fi = New-Object -TypeName System.IO.FileInfo -ArgumentList "$($firom.Directory)\$($inFile).$($name).img";
+    $path = "$($firom.Directory)$($global:separator)$($inFile).$($name).img";
+
+    if ($Details)
+    {
+        Write-Host "Export path: $($path)"
+    }
+
+    $fi = New-Object -TypeName System.IO.FileInfo -ArgumentList "$($path)";
     $fos = $fi.Create();
     [long]$totalCount = 0L
     $count = 0
@@ -1208,10 +1222,19 @@ function ExportPartition([long]$offset, [long]$len, [string]$name)
     $fos.Close();
 }
 
-if ($romFile.Contains("\")) {
+if ($IsLinux)
+{
+    $global:separator = "/"
+}
+else {
+    $global:separator = "\"
+}
+
+if ($romFile.Contains($global:separator)) {
 [System.IO.FileInfo]$fi = New-Object System.IO.FileInfo -ArgumentList "$($romFile)";
 } else {
-[System.IO.FileInfo]$fi = New-Object System.IO.FileInfo -ArgumentList "$(pwd)\$romFile";
+    $path = "$(pwd)$($global:separator)$($romFile)"
+[System.IO.FileInfo]$fi = New-Object System.IO.FileInfo -ArgumentList "$($path)";
 }
 
 if (-not [String]::IsNullOrEmpty($ExportPart) -and $ExportPart -ne "gro0" -and $ExportPart -ne "grw0" -and $ExportPart -ne "all")
@@ -1237,7 +1260,8 @@ $global:writablePartOffset = 0
 
 
 $blocTrailer = Read2 -offset 0x1FE
-$dumpDir = "$(pwd)\Dump"
+$path =  "$(pwd)$($global:separator)Dump";
+$dumpDir = "$($path)"
 
 if ($Extract)
 {
@@ -1335,24 +1359,27 @@ if ($($Normalize -or $Minimal) -and $global:writablePartOffset)
     Write-Host
 
     $x = $fs.Seek($offset, [System.IO.SeekOrigin]::Begin);
-    if ($romFile.Contains("\"))
+    if ($romFile.Contains($global:separator))
     {
-        $inFile = $romFile.Substring($romFile.LastIndexOf("\"), $($romFile.LastIndexOf(".") - $romFile.LastIndexOf("\")));
+        $inFile = $romFile.Substring($romFile.LastIndexOf($separator), $($romFile.LastIndexOf(".") - $romFile.LastIndexOf($separator)));
         $firom = New-Object -TypeName System.IO.FileInfo -ArgumentList "$($romFile)";
     }
     else
     {
         $inFile = $romFile.Substring(0, $romFile.LastIndexOf("."));
-        $firom = New-Object -TypeName System.IO.FileInfo -ArgumentList "$($PSScriptRoot)\$($romFile)";
+        $path = "$($PSScriptRoot)$($global:separator)$($romFile)";
+        $firom = New-Object -TypeName System.IO.FileInfo -ArgumentList "$($path)";
     }
     
     if ($Minimal)
     {
-        $fi = New-Object -TypeName System.IO.FileInfo -ArgumentList "$($firom.Directory)\$($inFile)_min.psv";
+        $path = "$($firom.Directory)$($global:separator)$($inFile)_min.psv";
+        $fi = New-Object -TypeName System.IO.FileInfo -ArgumentList "$($path)";
     }
     else
     {
-        $fi = New-Object -TypeName System.IO.FileInfo -ArgumentList "$($firom.Directory)\$($inFile)_norm.psv";
+        $path = "$($firom.Directory)$($global:separator)$($inFile)_norm.psv";
+        $fi = New-Object -TypeName System.IO.FileInfo -ArgumentList "$($path)";
     }
     Write-Host "Writing to $($fi.Name)"
     $fos = $fi.Create();
