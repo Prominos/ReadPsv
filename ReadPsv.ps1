@@ -7,7 +7,9 @@
     [switch]$Headered = $False,
     [switch]$Normalize = $False,
     [switch]$Minimal = $False,
-    [Parameter(Mandatory=$False)][String]$ExportPart
+    [Parameter(Mandatory=$False)][String]$ExportPart,
+    [switch]$NoHash = $False,
+    [switch]$NoCheckRawZero = $False
 )
 $ErrorActionPreference = "Stop"
 
@@ -483,6 +485,8 @@ function ReadFileDirectoryRecord($offset)
         Write-Host "Last Accessed: $(GetTimestamp -bytes $lastAccessedTimestamp)"
     }
 
+    $Global:curFile.Timestamp = $(GetTimestamp -bytes $createTimestamp);
+
     return $secondaryCount
 }
 
@@ -875,11 +879,11 @@ function ReadDirectory($offset, $dirName)
         $prevCluster = $global:curCluster;
     }
 
-    Write-Host "==========================================================================================================================="
+    Write-Host "========================================================================================================================================================================================"
     Write-Host "Listing for $($dirName) directory"
-    Write-Host "==========================================================================================================================="
-    Write-Host ([String]::Format("{0,-65}{1,-36}{2}", "File Name", "MD5", "Size"))
-    Write-Host "---------------------------------------------------------------------------------------------------------------------------"
+    Write-Host "========================================================================================================================================================================================"
+    Write-Host ([String]::Format("{0,-65}{1,-36}{2,-36}{3}", "File Name", "MD5", "Size", "Timestamp"))
+    Write-Host "----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------"
 
     for ($i = 0; $i -lt $Global:lstCurrDir.Count; $i++)
     {
@@ -887,7 +891,7 @@ function ReadDirectory($offset, $dirName)
 
         if ($cur.IsDirectory)
         {
-            Write-Host -ForegroundColor Cyan "$($cur.FileName) <DIR>"
+            Write-Host -ForegroundColor Cyan $([String]::Format("{0,-135}{1}", "$($cur.FileName) <DIR>", $cur.Timestamp));
             $cur.ParentDir = $dirName
             $Global:stack.Push($cur)
         }
@@ -895,13 +899,20 @@ function ReadDirectory($offset, $dirName)
         { 
             if ($cur.Contiguous)
             {
-                $md5 =  $(InternalFileHash -offset $cur.FileOffset -length $($cur.ValidDataLength -as [long]) -algorithm "MD5").Hash
+                if (-not $NoHash)
+                {
+                    $md5 =  $(InternalFileHash -offset $cur.FileOffset -length $($cur.ValidDataLength -as [long]) -algorithm "MD5").Hash
+                }
+                else
+                {
+                    $md5 = "N/A"
+                }
                 if ($Extract)
                 {
                     DumpFile -filename $cur.FileName -offset $cur.FileOffset -length $cur.ValidDataLength
                 }
                 $hum = GetHumanReadableBytes -num $cur.ValidDataLength
-                Write-Host ([String]::Format("{0,-60} {1}     {2,-9} B | {3}", $($cur.FileName), $($md5), $($cur.ValidDataLength), $hum)); 
+                Write-Host ([String]::Format("{0,-60} {1,-32}     {2,-9} B | {3, -23}{4}", $($cur.FileName), $($md5), $($cur.ValidDataLength), $hum, $cur.Timestamp)); 
             }
             else
             {
@@ -1222,7 +1233,7 @@ function ExportPartition([long]$offset, [long]$len, [string]$name)
     $fos.Close();
 }
 
-Write-Host "ReadPsv V1.1.0"
+Write-Host "ReadPsv V1.1.1"
 Write-Host
 
 if ($IsLinux)
@@ -1327,20 +1338,23 @@ for ($i = 1; $i -le $peNum; $i++)
     elseif ($global:partitionType -eq 0xDA)
     {
         Write-Host "Reading Partition #$($i) (RAW) @ 0x$([String]::Format("{0:X} Size: {1} bytes", $global:partitionOffset * 512, $global:partitionSize * 512))"
-        $az = CheckAllZeros -offset $($global:partitionOffset * 512) -len $($global:partitionSize * 512);
+        if (-not $NoCheckRawZero)
+        {
+            $az = CheckAllZeros -offset $($global:partitionOffset * 512) -len $($global:partitionSize * 512);
 
-        if ($az)
-        {
-            Write-Host "Partition is composed only of zeroes."
-        }
-        else
-        {
-            Write-Host "Partition contains some meaningfull data."
+            if ($az)
+            {
+                Write-Host "Partition is composed only of zeroes."
+            }
+            else
+            {
+                Write-Host "Partition contains some meaningfull data."
+            }
         }
     }
 
     Write-Host 
-    Write-Host "///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////"
+    Write-Host "////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////"
     Write-Host
     $peos = $peos + 17;
 
@@ -1349,7 +1363,7 @@ for ($i = 1; $i -le $peNum; $i++)
 if ($($Normalize -or $Minimal) -and $global:writablePartOffset)
 {
     Write-Host
-    Write-Host "==========================================================================================================================="
+    Write-Host "========================================================================================================================================================================================"
     if ($Minimal)
     {
       Write-Host  "Normalizing Dump (Minimal Change Mode)"
@@ -1358,7 +1372,7 @@ if ($($Normalize -or $Minimal) -and $global:writablePartOffset)
     {
         Write-Host "Normalizing Dump (Normal Mode)"
     }
-    Write-Host "==========================================================================================================================="
+    Write-Host "========================================================================================================================================================================================"
     Write-Host
 
     $x = $fs.Seek($offset, [System.IO.SeekOrigin]::Begin);
