@@ -5,7 +5,9 @@ A powershell cmdlet to parse the content and calculate the checksum of internal 
 ## Usage
 
 ```
-ReadPsv.PS1 -romFile [Path to psv file] [-Extract] [-Details] [-Headered] [-Normalize] [-Export (gro0 | grw0 | all)] [-Minimal]
+ReadPsv.PS1 -romFile [Path to psv file] [-Extract] [-Details] [-Headered] 
+                        [-Normalize] [-Export (gro0 | grw0 | all)] [-Minimal]
+                        [-NoHash] [-NoCheckRawZero] [-PartitionInfosOnly]
 ```
 
 - Extract: Will extract the internal files to the current working directory. This might take anyware around 1.5GB to 3.7GB of space and the files are encrypted.
@@ -14,6 +16,9 @@ ReadPsv.PS1 -romFile [Path to psv file] [-Extract] [-Details] [-Headered] [-Norm
 - Normalized: Use this flag when the original dump contains a writable (aka grw0) partition. This will create a second file (original file name with `_norm.psv` appended) with some variable fields removed from the grw0 partition. I have tried my best to stay as true as possible to an "unplayed/sealed" PSVita game all checksums were recalculated so the partition should act like a valid exFAT partition.
 - Minimal: Like the normalized mode but with less intrusive modifications.
 - Export: Let you export the `gro0` (rom) partition, `grw0` (writable) partition or `all` (both) as individual files. These files are in the exFAT format and are usable with forensic tools like autopsy.
+- NoHash: Skip MD5 hash calculation for inner files. This will significantly increase processing speed if file integrity checking is not needed.
+- NoCheckRawZero: Skip the check that make sure all the data in the raw partition is composed of only 0's. Increases processing time a little bit. Do not use if you want to make sure there's not hidden data in the raw partitions.
+- PartitionInfosOnly: Use if you just want an overview of all defined partitions in the file. ie: You are not interested in internal file structures details.
 - To output to a file instead of the console, use the `6>` redirection operator.
 
 ## Fields Affected by the normalization process
