@@ -9,7 +9,8 @@
     [switch]$Minimal = $False,
     [Parameter(Mandatory=$False)][String]$ExportPart,
     [switch]$NoHash = $False,
-    [switch]$NoCheckRawZero = $False
+    [switch]$NoCheckRawZero = $False,
+    [switch]$PartitionInfosOnly = $False
 )
 $ErrorActionPreference = "Stop"
 
@@ -459,7 +460,7 @@ function ReadFileAttributes($flags)
 function ReadFileDirectoryRecord($offset)
 {
     $secondaryCount = $cluster[$offset + 1];
-    $setChecksum = Read2 -offset $($offset + 2) -source $cluster
+    $global:setChecksum = Read2 -offset $($offset + 2) -source $cluster
     $fileAttributes = Read2 -offset $($offset + 4) -source $cluster
     $createTimestamp = Read4 -offset $($offset + 8) -source $cluster
     $lastModifiedTimestamp = Read4 -offset $($offset + 12) -source $cluster
@@ -473,7 +474,7 @@ function ReadFileDirectoryRecord($offset)
     if ($Details)
     {
         Write-Host "Number of directory records following this one: $($secondaryCount)"
-        Write-Host ([String]::Format("Directory record set checksum 0x{0:X4}", $setChecksum))
+        Write-Host ([String]::Format("Directory record set checksum 0x{0:X4}", $global:setChecksum))
     }
 
     ReadFileAttributes -flags $fileAttributes
@@ -804,6 +805,24 @@ function GetHumanReadableBytes($num)
 function ReadFileDirectoryRecordSet($offset)
 {
     $secondaryCount = ReadFileDirectoryRecord($offset)
+
+    #Write-Host ([string]::Format("HeapOS: 0x{0:X} + CurCluster 0x{1:X} * ClusterSize: 0x{2:X} + Offset: 0x{3:X}", $heapOffsetBytes, $($curCluster - 2), $clusterSize, $offset));
+    [long]$curByteAddr = $heapOffsetBytes + ($curCluster - 2) * $clusterSize + $offset;
+
+    $cs = EntrySetChecksum -offset $curByteAddr -SecondaryCount $secondaryCount
+
+    if ($Details)
+    {
+        CheckAndPrint -label "Calculated checksum:" -val $([String]::Format("0x{0:X4}", $cs)) -cond $($cs -eq $global:setChecksum)
+    }
+    
+    if ($cs -ne $global:setChecksum)
+    {
+        cleanup
+        Write-Error ([string]::Format("FileEntryRecordSet Checksum error @ 0x{0:X} Calculated: 0x{1:X4} Recorded: 0x{2:X4}", $curByteAddr, $cs, $global:setChecksum));
+        exit
+    }
+
     if ($Details)
     {
         Write-Host
@@ -844,7 +863,16 @@ function ReadFileDirectoryRecordSet($offset)
 
     $Global:curFile.FileName = $ffname
     $Global:lstCurrDir.Add($Global:curFile.Clone())
+
+    #if ($ffname -eq "patch" -or $ffname -eq "temp")
+    #{
+    #    write-host ("File Name: $($Global:curFile.FileName)");
+    #    write-host ([String]::format("File Offset: 0x{0:X}", $Global:curFile.FileOffset));
+    #}
+
     $Global:currFile = @{}
+
+
 
     $retVal = $(64 + $secondaryCount*32)
 
@@ -879,8 +907,17 @@ function ReadDirectory($offset, $dirName)
         $prevCluster = $global:curCluster;
     }
 
+    if ($global:pCodeName.Contains("gro0"))
+    {
+        $partName = "gro0:"
+    }
+    elseif ($global:pCodeName.Contains("grw0"))
+    {
+        $partName = "grw0:"
+    }
+
     Write-Host "========================================================================================================================================================================================"
-    Write-Host "Listing for $($dirName) directory"
+    Write-Host "Listing for $($partName)$($dirName) directory"
     Write-Host "========================================================================================================================================================================================"
     Write-Host ([String]::Format("{0,-65}{1,-36}{2,-36}{3}", "File Name", "MD5", "Size", "Timestamp"))
     Write-Host "----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------"
@@ -1119,7 +1156,7 @@ function CheckAllZeros([long]$offset, [long]$len)
 function BootChecksum([long]$offset, [bool]$zeroOut=$true)
 {
     [uint32]$NumberOfBytes = 512 * 11;
-    [uint32]$Checksum = 0;
+    [uint64]$Checksum = 0;
     [uint32]$Index = 0;
 
     $x = $fs.Seek($offset, [System.IO.SeekOrigin]::Begin);
@@ -1150,16 +1187,56 @@ function BootChecksum([long]$offset, [bool]$zeroOut=$true)
         if ($Checksum -band 1)
         {
             #Write-Host -NoNewline ([string]::Format("0x{0:X8} + 0x{1:X8} + 0x{2:X8} = ", $ph, $theShift, $theByte))
-            $Checksum = $theShift + $theByte + $ph  
+            $Checksum = $theShift + $theByte + $ph
+            $Checksum = $Checksum -band 0xFFFFFFFF
         }
         else
         {
             #Write-Host -NoNewline ([string]::Format("0x{0:X8} + 0x{1:X8} = ", $theShift, $theByte))
             $Checksum = $theShift + $theByte;
+            $Checksum = $Checksum -band 0xFFFFFFFF
         }
         #Write-Host ([string]::Format("0x{0:X8}", $Checksum));
     }
 
+    return $Checksum;
+}
+
+function EntrySetChecksum([long]$offset, $SecondaryCount)    
+{
+    [uint16]$NumberOfBytes = ($SecondaryCount + 1) * 32;
+    [uint32]$Checksum = 0;
+    [uint16]$Index = 0;
+
+    $x = $fs.Seek($offset, [System.IO.SeekOrigin]::Begin);
+    $buffer = [Byte[]]::new($NumberOfBytes);
+    $x = $fs.Read($buffer,0,$buffer.Length)
+
+    for ($Index; $Index -lt $NumberOfBytes; $Index++)
+    {
+        if (($Index -eq 2) -or ($Index -eq 3))
+        {
+            continue;
+        }
+        $theByte = $buffer[$Index];
+        $theByte = $theByte -as [uint16]
+        $theShift = $Checksum -shr 1;
+        $theShift = $theShift -as [uint16]
+        [uint16]$ph = 0x8000
+        if ($Checksum -band 1)
+        {
+            #Write-Host -NoNewline ([string]::Format("0x{0:X4} + 0x{1:X4} + 0x{2:X4} = ", $ph, $theShift, $theByte))
+            $Checksum = $theShift + $theByte + $ph
+            $Checksum = $Checksum -band 0xFFFF  
+        }
+        else
+        {
+            #Write-Host -NoNewline ([string]::Format("0x{0:X4} + 0x{1:X4} = ", $theShift, $theByte))
+            $Checksum = $theShift + $theByte;
+            $Checksum = $Checksum -band 0xFFFF
+        }
+        #Write-Host ([string]::Format("0x{0:X4}", $Checksum));
+    }
     return $Checksum;
 }
 
@@ -1233,7 +1310,7 @@ function ExportPartition([long]$offset, [long]$len, [string]$name)
     $fos.Close();
 }
 
-Write-Host "ReadPsv V1.1.1"
+Write-Host "ReadPsv V1.1.2"
 Write-Host
 
 if ($IsLinux)
@@ -1313,6 +1390,12 @@ while (ReadPartitionEntry -offset $peos)
 
     $peNum++
     $peos = $peos + 17
+}
+
+if($PartitionInfosOnly)
+{
+    Cleanup
+    exit
 }
 
 $peNum--;
