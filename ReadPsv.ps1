@@ -805,6 +805,8 @@ function GetHumanReadableBytes($num)
 function ReadFileDirectoryRecordSet($offset)
 {
     $secondaryCount = ReadFileDirectoryRecord($offset)
+	$delayedFailure = $false
+	$failureAddress = 0
 
     #Write-Host ([string]::Format("HeapOS: 0x{0:X} + CurCluster 0x{1:X} * ClusterSize: 0x{2:X} + Offset: 0x{3:X}", $heapOffsetBytes, $($curCluster - 2), $clusterSize, $offset));
     [long]$curByteAddr = $heapOffsetBytes + ($curCluster - 2) * $clusterSize + $offset;
@@ -815,12 +817,14 @@ function ReadFileDirectoryRecordSet($offset)
     {
         CheckAndPrint -label "Calculated checksum:" -val $([String]::Format("0x{0:X4}", $cs)) -cond $($cs -eq $global:setChecksum)
     }
+	
+	
     
     if ($cs -ne $global:setChecksum)
     {
-        cleanup
-        Write-Error ([string]::Format("FileEntryRecordSet Checksum error @ 0x{0:X} Calculated: 0x{1:X4} Recorded: 0x{2:X4}", $curByteAddr, $cs, $global:setChecksum));
-        exit
+		$delayedFailure = $true
+		$failureAddress = $curByteAddr
+        
     }
 
     if ($Details)
@@ -860,6 +864,24 @@ function ReadFileDirectoryRecordSet($offset)
     {
         Write-Host "Full File Name: $($ffname)"
     }
+	
+	if ($delayedFailure)
+	{
+		if ($global:pCodeName.Contains("gro0"))
+		{
+			$partName = "gro0:"
+		}
+		elseif ($global:pCodeName.Contains("grw0"))
+		{
+			$partName = "grw0:"
+		}
+		
+		$fulldirname = "$($partName)$Global:dir"
+		
+        Write-Error ([string]::Format("FileEntryRecordSet Checksum error @ 0x{0:X} Calculated: 0x{1:X4} Recorded: 0x{2:X4} Directory: {4} File: {3}", $failureAddress, $cs, $global:setChecksum, $ffname, $fulldirname));
+		cleanup
+        exit
+	}
 
     $Global:curFile.FileName = $ffname
     $Global:lstCurrDir.Add($Global:curFile.Clone())
@@ -1485,11 +1507,20 @@ if ($($Normalize -or $Minimal) -and $global:writablePartOffset)
     $fos = $fi.Create();
     $numRomBlocks = $global:writablePartOffset / $block.Length
     Write-Host "Copying gro0 partition, this may take a while..."
+	write-host "$($numRomBlocks) blocks"
     for ($i=0; $i -lt $numRomBlocks; $i++)
     {
         ReadBlock -blockNum $i
         $fos.Write($block, 0, $block.Count);
+		$percent = $i -as [double]
+		$percent = [Math]::Round($i/$numRomBlocks*100, 2, 1)
+		
+		if ($i % 10000 -eq 0)
+		{
+			Write-Progress -Activity "Writing gr0" -Status "$i/$numRomBlocks ($($percent)%) Complete" -PercentComplete $percent
+		}
     }
+	Write-Progress -Activity "Writing gr0" -Completed
     
     $numRamBlocks = $global:writablePartLen / $block.Length
     $rootDirIdx = $global:writableRootDirOS / $block.Length - $numRomBlocks
@@ -1646,9 +1677,16 @@ if ($($Normalize -or $Minimal) -and $global:writablePartOffset)
             }
         }
         
+		$percent = $i -as [double]
+		$percent = [Math]::Round($i/$numRamBlocks*100, 2, 1)
 
         $fos.Write($block, 0, $block.Count);
+		if ($i % 10000 -eq 0)
+		{
+			Write-Progress -Activity "Writing grw0" -Status "$i/$numRamBlocks ($($percent)%) Complete" -PercentComplete $percent
+		}
     }
+	Write-Progress -Activity "Writing grw0" -Completed
 
     Write-Host "Writing Empty Partition"
     $emptyPartOffset = $($global:writablePartOffset + $global:writablePartLen)
