@@ -2,6 +2,8 @@
 
 A powershell cmdlet to parse the content and calculate the checksum of internal file in a .psv file dumped using [psvgamesd](https://github.com/motoharu-gosuto/psvgamesd) 
 
+**Note that powershell 7.2.24 or newer is required to run this script.**
+
 ## Usage
 
 ```
